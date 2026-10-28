@@ -5,6 +5,8 @@
   "parallel_jobs": 1,
   "seed": 20261028,
   "execute_authorized": false,
+  "z_pad_low": 0,
+  "z_pad_high": 0,
   "ants_root": "C:/PRIVATE_TOOLS/ANTs-2.6.5-windows",
   "official_script": "C:/PRIVATE_REFERENCE/antsMultivariateTemplateConstruction2.sh",
   "evidence_index_sha256": "REPLACE_WITH_APPROVED_PRIVATE_FILE_SHA256_JSON_HASH",

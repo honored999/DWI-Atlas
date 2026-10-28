@@ -1,6 +1,6 @@
 # Windows ANTs affine Atlas pilot
 
-状态：最小实现源码与配置已获独立静态审查PASS（2026-10-28）；审查后本README仅补充初始化偏离说明，源码与配置未改。该文档补充未再次独立审查；静态PASS不代表运行或几何验收。入口、plan、ANTs、合成几何、真实配准、数值结果、训练及资源预检全部 **NOT_RUN**。AST语法解析不能证明运行或几何正确。本轮不安装依赖、不执行入口（包括 --help）、不运行pytest。
+状态：原最小实现源码与配置曾获独立静态审查PASS（2026-10-28）；其后README初始化偏离说明及本次最小Z参数补丁的最终diff独立静态审查均PENDING。历史静态PASS不覆盖本次修改，也不代表运行或几何验收。入口、plan、ANTs、合成几何、真实配准、数值结果、训练及资源预检全部 **NOT_RUN**。AST语法解析不能证明运行或几何正确。本轮不安装依赖、不执行入口（包括 --help）、不运行pytest。
 
 只有三个交付文件：`atlas.py`、`configs/pilot.example.json`、本README。运行时依赖Python 3.10+、现有SimpleITK/numpy及Windows ANTs 2.6.5；不安装或升级它们。此工具是本地Windows适配，不是官方Bash脚本原样执行，也不表示CG-SAMR数值复现。
 
@@ -19,7 +19,7 @@
 | 形状更新 | AverageAffineTransform（含刚体成分），对平均模板施加平均仿射的逆；Affine路径无位移场、无gradient-step操作 |
 | 随机性 | 固定seed=20261028，ANTs参数及子进程环境记录；2线程不保证跨机器位级确定性 |
 | 插值 | DWI/Atlas Linear，域掩膜 NearestNeighbor，域外0，图像float32 |
-| 参考网格 | 使用既有ITK候选：面内256×256、保持Z/方向/原点及体素中心跨度；不是已验收覆盖 |
+| 参考网格 | 使用既有ITK基础候选：面内256×256、原spacing/direction；可显式配置Z整数扩层，缺省0/0保持原几何；不是已验收覆盖 |
 
 预算是候选，不是实际运行授权。示例 `execute_authorized=false`。配置中的协议值严格校验，未实现任意多模态/全100次/患者时间点权重/SyN/调参接口。30个配准任务各有两个优化阶段（60阶段）；另有10个质心变换、10次初始化重采样、3次平均、2次仿射平均/形状更新、20次循环DWI重采样、30次最终DWI/Atlas/覆盖重采样和Python图像检查/域生成/覆盖聚合。预计耗时/峰值内存未知。
 
@@ -65,6 +65,16 @@ ITK size/spacing/index为XYZ，direction为flattened row-major 3×3，origin/物
 在antsApplyTransforms图像pull语义下，fixed=模板、moving=患者，输出仿射A用于患者影像到模板的重采样；物理采样点从模板LPS映至患者LPS。Atlas到患者原网格使用`[A,1]`，reference为原患者。该语义与点映射不能混用。Rigid+Affine由ANTs collapse为单个0GenericAffine.mat；无额外变换列表复合。平均仿射的逆仅用于模板形状更新，最后逐例A来自冻结后的template_02，不使用iter2的旧A。
 
 扫描域是源采集完整体素网格上全1（包括去颅骨后为0的区域），假设该矩形网格全部为有效采集；不是非零DWI、3mm keep mask、脑覆盖或GT。若采集中含填充/缺片，该假设不成立，必须先明确实际域规则，不能自动改用keep mask。最终10个域用相同最终A及最近邻映射；输出coverage_count、coverage_fraction=count/10及coverage_common=count==10，并记录共同/联合覆盖体素数和共同域占参考网格比例。不同覆盖造成的平均偏差仍须质检，本轮不加入覆盖加权。
+
+## 可选Z整数扩层（本轮仅静态检查）
+
+配置 `z_pad_low`、`z_pad_high` 分别沿ITK索引Z低端和高端扩层，缺省均为0；只接受非负整数，拒绝bool、负数、浮点、字符串和null，不静默转换。prepare解析后的两个整数记录在resolved_config、执行config及reference步骤中；原受信grid不改。0/0保持旧reference几何及处理参数，元数据允许新增两个0字段。
+
+令基础层数为Nz、Z间距为spacing_z、方向矩阵为D：新层数为 `Nz + z_pad_low + z_pad_high`，新LPS原点为 `origin - D[:,2] * spacing_z * z_pad_low`。移动的是三分量原点，低/高端不是世界Z方向；旧索引(i,j,k)与新(i,j,k+z_pad_low)物理位置一致。XY、spacing、direction和患者原网格不变；保留基础候选XYZ中心跨度校验，并在扩层后检查XY跨度、新Z层数及两个基础角点物理嵌入（绝对1e-4 mm、相对容差0）。图像库仍仅在execute中延迟导入。
+
+8/10仅为旧变换限定集合Z包络的待选候选，不是默认值、最小脑覆盖、必要层数、新网格优化后的充分保证或全XYZ保证。16→34层只增加背景/采样空间，不增加真实层间信息；完整矩形59/60条XY越界及两轮逆采样XY不足的限制仍在。更大网格可能改变耗时、资源峰值和优化结果；注册任务仍为30次，参数及后续路径不变。
+
+本补丁仅做静态检查，运行验证全部NOT_RUN；不自动选padding、不改旧受信网格/清单/旧run，不新增真实执行配置或重跑。未来选择8/10须使用独立新配置与全新run-id，另行确认资源和执行范围；输出继续受现有路径隔离及拒绝run复用约束保护。
 
 ## 将来服务器用法（本轮未执行）
 

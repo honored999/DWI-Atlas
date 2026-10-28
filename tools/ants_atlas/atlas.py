@@ -83,6 +83,11 @@ def prepare(args):
                           'window': 10, 'shrink': '6x4x2x1', 'smooth_vox': '3x2x1x0',
                           'sampling': 'None', 'fraction': '1'}, 'Affine settings changed')
     require(type(c['seed']) is int and c['seed'] == 20261028, 'Candidate seed changed')
+    for key in ('z_pad_low', 'z_pad_high'):
+        value = c.get(key, 0)
+        require(type(value) is int and value >= 0,
+                key + ' must be a non-negative integer')
+        c[key] = value
     evidence = path_checked(args.evidence, True)
     require(evidence.is_dir(), 'Evidence directory required')
     index = pinned(evidence / 'FILE_SHA256.json', c['evidence_index_sha256'])
@@ -181,7 +186,9 @@ def build(c, records, inputs, grid, exes, run):
         internal('check_image', path=str(output), reference=str(reference), mask=False)
 
     reference = run / 'reference.nii.gz'
-    internal('reference', output=str(reference), grid=grid)
+    internal('reference', output=str(reference), grid=grid,
+             z_pad_low=c.get('z_pad_low', 0),
+             z_pad_high=c.get('z_pad_high', 0))
     init = []
     for i, image in enumerate(inputs):
         internal('check_source', path=str(image), header=records[i]['actual_ITK_header'])
@@ -301,13 +308,37 @@ def execute(c, records, inputs, run, evidence_paths, steps):
                 require(reduced['shape_xyz'][:2] == [256, 256] and
                         reduced['shape_xyz'][2] == h['shape_xyz'][2] and
                         reduced['spacing_xyz'][2] == h['spacing_xyz'][2], 'Grid candidate changed')
-                im = sitk.Image(reduced['shape_xyz'], sitk.sitkFloat32)
+                require(all(math.isclose((h['shape_xyz'][k]-1)*h['spacing_xyz'][k],
+                                          (reduced['shape_xyz'][k]-1)*reduced['spacing_xyz'][k],
+                                          abs_tol=1e-4)
+                            for k in range(3)), 'Base voxel-centre extent changed')
+                p_low = s.get('z_pad_low', 0)
+                p_high = s.get('z_pad_high', 0)
+                for key, value in (('z_pad_low', p_low), ('z_pad_high', p_high)):
+                    require(type(value) is int and value >= 0,
+                            key + ' must be a non-negative integer')
+                shape = list(reduced['shape_xyz'])
+                shape[2] += p_low + p_high
+                origin = [h['origin_lps'][j]
+                          - h['direction_lps'][j][2] * reduced['spacing_xyz'][2] * p_low
+                          for j in range(3)]
+                im = sitk.Image(shape, sitk.sitkFloat32)
                 im.SetSpacing(reduced['spacing_xyz'])
-                im.SetOrigin(h['origin_lps'])
+                im.SetOrigin(origin)
                 im.SetDirection([v for row in h['direction_lps'] for v in row])
                 require(all(math.isclose((h['shape_xyz'][k]-1)*h['spacing_xyz'][k],
                                           (im.GetSize()[k]-1)*im.GetSpacing()[k], abs_tol=1e-4)
-                            for k in range(3)), 'Voxel-centre extent changed')
+                            for k in range(2)), 'XY voxel-centre extent changed')
+                require(im.GetSize()[2] == reduced['shape_xyz'][2] + p_low + p_high,
+                        'Padded Z size changed')
+                for q in ((0, 0, 0), (255, 255, reduced['shape_xyz'][2] - 1)):
+                    old_point = [h['origin_lps'][j] + sum(
+                        h['direction_lps'][j][k] * reduced['spacing_xyz'][k] * q[k]
+                        for k in range(3)) for j in range(3)]
+                    new_point = im.TransformIndexToPhysicalPoint((q[0], q[1], q[2] + p_low))
+                    require(all(math.isclose(old_point[j], new_point[j],
+                                             abs_tol=1e-4, rel_tol=0)
+                                for j in range(3)), 'Original grid physical embedding changed')
                 sitk.WriteImage(im, s['output'])
             elif kind == 'centre':
                 fixed, moving = image(s['fixed']), image(s['moving'])
