@@ -1,0 +1,27 @@
+{
+  "dimension": 3,
+  "outer_iterations": 2,
+  "threads": 2,
+  "parallel_jobs": 1,
+  "seed": 20261028,
+  "execute_authorized": false,
+  "ants_root": "C:/PRIVATE_TOOLS/ANTs-2.6.5-windows",
+  "official_script": "C:/PRIVATE_REFERENCE/antsMultivariateTemplateConstruction2.sh",
+  "evidence_index_sha256": "REPLACE_WITH_APPROVED_PRIVATE_FILE_SHA256_JSON_HASH",
+  "read_only_data_roots": ["C:/PRIVATE_DATA/DWI"],
+  "scan_domain": "full_acquisition_voxel_grid",
+  "extra_initial_rigid": false,
+  "n4": false,
+  "sharpen": false,
+  "average_images_mode": 2,
+  "rigid": {
+    "iterations": "1000x500x250x0", "threshold": "1e-6", "window": 10,
+    "shrink": "6x4x2x1", "smooth_vox": "4x2x1x0",
+    "sampling": "Regular", "fraction": "0.25"
+  },
+  "affine": {
+    "iterations": "100x100x70x20", "threshold": "1e-9", "window": 10,
+    "shrink": "6x4x2x1", "smooth_vox": "3x2x1x0",
+    "sampling": "None", "fraction": "1"
+  }
+}
