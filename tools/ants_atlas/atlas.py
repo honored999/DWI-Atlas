@@ -1,4 +1,4 @@
-"""Windows ANTs affine atlas pilot. Default plan reads JSON metadata only."""
+"""Windows ANTs affine atlas. Default plan reads JSON metadata only."""
 import argparse
 import hashlib
 import json
@@ -67,11 +67,46 @@ def pinned(path, digest):
     return p
 
 
+def select_records(c, selection, full, train, val):
+    """Select only the accepted pilot or the exact pinned fold0 training cohort."""
+    cohort = c.get('input_cohort', 'pilot10')
+    require(cohort in ('pilot10', 'fold0_train100'), 'Unsupported input cohort')
+    pilot = selection['selected']
+    require(selection['selection_unchanged'] is True and len(pilot) == 10 and
+            len({r['case_id'] for r in pilot}) == 10 and
+            len({r['patient_pseudonym'] for r in pilot}) == 10, 'Pilot identity changed')
+    require(len(train) == 100 and len(val) == 28 and not train & val, 'Fold0 mismatch')
+    require(all(r['case_id'] in train for r in pilot), 'Pilot not in fold0 training set')
+    if cohort == 'pilot10':
+        require(c.get('weighting', 'equal_check') == 'equal_check', 'Unsupported weighting')
+        return pilot
+    require(c.get('weighting') == 'equal_check', 'Explicit equal_check weighting required')
+    require(full is not None and full['status'] == 'SERVER_READONLY_VERIFIED' and
+            full['split_sha256'] == SPLIT_SHA and full['weighting'] == 'equal_check',
+            'Full training manifest not verified')
+    records, validation = full['selected'], full['validation_cases']
+    require(len(records) == 100 and {r['case_id'] for r in records} == train,
+            'Full manifest must contain all and only 100 training checks')
+    require([r['case_id'] for r in records] == sorted(train), 'Training order must be sorted')
+    require(len(validation) == 28 and {r['case_id'] for r in validation} == val,
+            'Validation identity manifest mismatch')
+    tp = {r['patient_pseudonym'] for r in records}
+    vp = {r['patient_pseudonym'] for r in validation}
+    require(len(tp) == 27 and len(vp) == 7 and not tp & vp, 'Patient grouping/overlap mismatch')
+    by_case = {r['case_id']: r for r in records}
+    for accepted in pilot:
+        r = by_case[accepted['case_id']]
+        require(all(r[k] == accepted[k] for k in
+                    ('patient_pseudonym', 'dwi_path', 'verified_511_file_sha256',
+                     'actual_ITK_header')), 'Accepted pilot identity changed in full manifest')
+    return records
+
+
 def prepare(args):
     cfg_path = path_checked(args.config, True)
     c = read_json(cfg_path)
     require(c['dimension'] == 3 and c['outer_iterations'] == 2 and
-            c['threads'] == 2 and c['parallel_jobs'] == 1, 'Only candidate pilot budget supported')
+            c['threads'] == 2 and c['parallel_jobs'] == 1, 'Only the fixed two-round/two-thread serial budget supported')
     require(c['n4'] is False and c['sharpen'] is False and
             c['average_images_mode'] == 2 and c['extra_initial_rigid'] is False,
             'Only explicit candidate processing supported')
@@ -102,21 +137,22 @@ def prepare(args):
     require(a['cohort'] == {'checks': 128, 'patient_fields': 34, 'fold0_train_checks': 100,
             'fold0_train_patient_fields': 27, 'fold0_val_checks': 28,
             'fold0_val_patient_fields': 7, 'all_five_fold_patient_overlap': 0}, 'Cohort mismatch')
-    records = selection['selected']
-    require(len(records) == 10, 'Exactly ten fixed pilot inputs required')
-    require(len({r['case_id'] for r in records}) == 10 and
-            len({r['patient_pseudonym'] for r in records}) == 10, 'Duplicate identity')
     split_path = pinned(args.split, SPLIT_SHA)
     folds = read_json(split_path)
     train, val = set(folds[0]['train']), set(folds[0]['val'])
     require(len(train) == 100 and len(val) == 28 and not train & val, 'Fold0 mismatch')
-    require(all(r['case_id'] in train and r['case_id'] not in val for r in records),
-            'Pilot not in accepted fold0 training set')
+    full = None
+    if c.get('input_cohort', 'pilot10') == 'fold0_train100':
+        name = 'fold0_train100_identity_private.json'
+        paths[name] = pinned(evidence / name, hashes[name])
+        full = read_json(paths[name])
+    records = select_records(c, selection, full, train, val)
+    count = len(records)
     source_script = pinned(c['official_script'], SOURCE_SHA)
     data_roots = [path_checked(x, True) for x in c['read_only_data_roots']]
     require(bool(data_roots) and all(p.is_dir() for p in data_roots), 'Data roots required')
     inputs = [path_checked(r['dwi_path'], True) for r in records]
-    require(len({os.path.normcase(str(p)) for p in inputs}) == 10, 'Duplicate input path')
+    require(len({os.path.normcase(str(p)) for p in inputs}) == count, 'Duplicate input path')
     require(all(any(within(p, d) for d in data_roots) for p in inputs), 'Input outside data roots')
     require(all(p.name == r['case_id'] + '_0000.nii.gz' for p, r in zip(inputs, records)),
             'DWI identity/name mismatch')
@@ -233,6 +269,9 @@ def build(c, records, inputs, grid, exes, run):
 def execute(c, records, inputs, run, evidence_paths, steps):
     require(os.name == 'nt', 'Execution is Windows-only')
     require(c['execute_authorized'] is True, 'Candidate only: execution authorization required')
+    if c.get('input_cohort', 'pilot10') == 'fold0_train100':
+        require(c.get('geometric_qc_accepted') is True,
+                'Full cohort geometric QC acceptance required before execute')
     # Lazy imports: plan never imports an image library or reads image bytes/voxels.
     import SimpleITK as sitk
     import numpy as np
@@ -373,19 +412,21 @@ def execute(c, records, inputs, run, evidence_paths, steps):
                 sitk.WriteImage(mask, s['output'])
             elif kind == 'coverage':
                 ref = image(s['reference'])
+                total = len(s['masks'])
+                require(total > 0 and total == len(records), 'Coverage/input count mismatch')
                 count = np.zeros(tuple(reversed(ref.GetSize())), dtype=np.float32)
                 for p in s['masks']:
                     mask = image(p)
                     geometry(mask, ref)
                     count += sitk.GetArrayViewFromImage(mask)
-                for name, arr in [('coverage_count', count), ('coverage_fraction', count / 10),
-                                  ('coverage_common', (count == 10).astype(np.float32))]:
+                for name, arr in [('coverage_count', count), ('coverage_fraction', count / total),
+                                  ('coverage_common', (count == total).astype(np.float32))]:
                     im = sitk.GetImageFromArray(arr)
                     im.CopyInformation(ref)
                     sitk.WriteImage(im, str(run / (name + '.nii.gz')))
-                s['common_voxels'] = int((count == 10).sum())
+                s['common_voxels'] = int((count == total).sum())
                 s['union_voxels'] = int((count > 0).sum())
-                s['common_fraction_reference_grid'] = float((count == 10).mean())
+                s['common_fraction_reference_grid'] = float((count == total).mean())
             else:
                 raise ValueError('Unknown step')
             state['completed_steps'] = n + 1
@@ -413,7 +454,7 @@ def main():
     steps = build(c, records, inputs, grid, exes, run)
     if args.mode == 'plan':
         print(json.dumps({'status': 'PLAN_ONLY', 'runtime_validation': 'NOT_RUN',
-                          'run': str(run), 'resolved_config': c, 'registration_tasks': 30,
+                          'run': str(run), 'resolved_config': c, 'registration_tasks': sum(s.get('tool') == 'antsRegistration' for s in steps),
                           'steps': steps}, indent=2))
     else:
         execute(c, records, inputs, run, evidence, steps)

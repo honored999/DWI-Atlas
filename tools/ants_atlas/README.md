@@ -1,5 +1,19 @@
 # Windows ANTs affine Atlas pilot
 
+## 2026-10-29：fold0训练100次的最小适配
+
+此节覆盖下方旧交付范围和历史NOT_RUN状态；下方其余来源、几何、路径与原始数据保护契约继续适用。旧10例配置缺省仍走`pilot10`，不改变其配准行为。新增`configs/fold0_train100.example.json`仅为准备配置，`execute_authorized=false`、`geometric_qc_accepted=false`，不构成全量启动授权。该源码快照已获独立Level 3代码静态审查PASS；真实几何仍为NEEDS_REVIEW。服务器部署和全量运行尚未执行。
+
+- `input_cohort=fold0_train100`：严格使用既定fold0全部100次训练检查/27位患者；验证28次/7位患者仅核对身份分组，不读验证影像或GT。
+- 复用原三项阶段A证据；新私有证据目录另加入`fold0_train100_identity_private.json`，通过新`FILE_SHA256.json`及配置的`evidence_index_sha256`固定。不要改写旧证据索引。全量manifest必须包含`status=SERVER_READONLY_VERIFIED`、固定`split_sha256`、`weighting=equal_check`、按case排序的100项`selected`及28项`validation_cases`。训练项沿用小样的路径、患者伪匿名、源文件SHA256与实际ITK头字段；固定10例身份和参考必须不变。
+- 明确采用每次检查等权的候选（AverageImages mode2不变），不是每患者等权。多时间点患者贡献更多，实际分布与最终选择应在运行前确认。未实现任意加权、SyN或覆盖加权。
+- 保持两轮、2线程、串行、seed、Rigid/Affine参数、初始质心、Z8/10、最终冻结后重新逐例注册和逆映回。100项计划包含300次注册、1814步；覆盖fraction分母和common阈值采用实际输入数。
+- `plan`仍只读元数据/文件身份，不调用ANTs、不创建run；`execute`除既有显式授权外，还要求全量`geometric_qc_accepted is True`。这个显式确认字段不能替代实际几何证据。
+- 本轮20项轻量合成测试通过，覆盖训练完整性/患者互斥/受信manifest/旧10例/覆盖数值/输出保护；没有用合成测试证明真实图像质量。测试命令为`python -B -m unittest discover -s tools/ants_atlas/tests -p test_full_cohort.py -v`，运行前须做资源预检。
+
+后续应在独立审查与真实小样几何验收后，按本地审查→用户授权提交推送→服务器`git pull --ff-only`流程同步代码，不通过覆盖服务器未提交文件部署。准备配置保持禁止执行，服务器真实full prepare/plan与全量配准尚未运行。
+
+
 状态：原最小实现源码与配置曾获独立静态审查PASS（2026-10-28）；其后README初始化偏离说明及本次最小Z参数补丁的最终diff独立静态审查均PENDING。历史静态PASS不覆盖本次修改，也不代表运行或几何验收。入口、plan、ANTs、合成几何、真实配准、数值结果、训练及资源预检全部 **NOT_RUN**。AST语法解析不能证明运行或几何正确。本轮不安装依赖、不执行入口（包括 --help）、不运行pytest。
 
 只有三个交付文件：`atlas.py`、`configs/pilot.example.json`、本README。运行时依赖Python 3.10+、现有SimpleITK/numpy及Windows ANTs 2.6.5；不安装或升级它们。此工具是本地Windows适配，不是官方Bash脚本原样执行，也不表示CG-SAMR数值复现。
