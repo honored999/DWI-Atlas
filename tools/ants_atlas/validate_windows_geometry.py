@@ -24,6 +24,42 @@ def require(ok, message):
         raise RuntimeError(message)
 
 
+def physical_gradient(u, direction, spacing):
+    import numpy as np
+    return np.stack([np.stack(np.gradient(u[...,i],axis=(2,1,0)),axis=-1) for i in range(3)],axis=-2) @ np.linalg.inv(direction @ np.diag(spacing))
+
+
+def check_shear_jacobian(u, xyz, direction, spacing, interior, amplitude=.35, length=8.):
+    import numpy as np
+    basis=direction @ np.diag(spacing)
+    analytic=np.zeros(xyz.shape[:-1]+(3,3))
+    analytic[...,0,1]=amplitude/length*np.cos(xyz[...,1]/length)
+    analytic_error=np.abs(np.linalg.det(analytic+np.eye(3))-1)
+    require(analytic_error.max()<1e-6, 'Analytic shear Jacobian differs from one')
+    numeric=physical_gradient(u,direction,spacing)
+    # Unit-index central error <= max third derivative / 6.
+    # First-order boundary error <= max second derivative / 2.
+    bounds=np.zeros(xyz.shape)
+    for j,axis in enumerate((2,1,0)):
+        h=abs(basis[1,j])
+        bounds[...,j]=abs(amplitude)*h**3/(6*length**3)
+        edge=[slice(None)]*3
+        for endpoint in (0,-1):
+            edge[axis]=endpoint
+            bounds[tuple(edge)+(j,)]=abs(amplitude)*h**2/(2*length**2)
+    bound=bounds @ np.abs(np.linalg.inv(basis))+1e-12
+    delta=np.abs(numeric-analytic)
+    require(np.isfinite(numeric).all() and np.all(delta[...,0,:]<=bound) and delta[...,1:,:].max()<=1e-12,
+            'Finite-difference shear derivative exceeds truncation bound')
+    determinant=np.linalg.det(numeric+np.eye(3)); error=abs(determinant-1)
+    require(determinant.min()>0,'Finite-difference shear folding')
+    return dict(analytic_det_error=float(analytic_error.max()), finite_det_max=float(error.max()),
+                max_location_zyx=list(map(int,np.unravel_index(error.argmax(),error.shape))),
+                interior_det_error=float(error[interior].max()),boundary_det_error=float(error[~interior].max()),
+                interior_derivative_error=float(delta[interior].max()),boundary_derivative_error=float(delta[~interior].max()),
+                interior_derivative_bound=float(bound[interior].max()),boundary_derivative_bound=float(bound[~interior].max()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ants-root', type=Path, required=True)
@@ -144,12 +180,8 @@ def main():
         check_error('noncommuting_inverse',mapping('inverse',[f'[{mat},1]',inverse]),W(Ai(xyz),-1),mask)
         state['checks']['noncommuting_chain']=True
         jac=sitk.GetArrayFromImage(sitk.DisplacementFieldJacobianDeterminant(read(warp)))
-        # Independent physical finite differences (direction-aware).
-        derivatives=np.stack([np.stack(np.gradient(displacement[...,i],axis=(2,1,0)),axis=-1) for i in range(3)],axis=-2)
-        J=derivatives@np.linalg.inv(D@np.diag(grid.GetSpacing()))+np.eye(3)
-        require(np.max(np.abs(np.linalg.det(J)-1))<1e-6, 'Analytic shear Jacobian differs from one')
+        state['errors']['analytic_jacobian']=check_shear_jacobian(displacement, xyz, D, np.array(grid.GetSpacing()), mask, a, L)
         require(np.isfinite(jac).all() and np.min(jac)>0, 'Nonpositive field Jacobian')
-        state['errors']['analytic_jacobian']={'physical_max_abs_det_minus_one':float(np.max(np.abs(np.linalg.det(J)-1)))}
         state['checks']['jacobian']=True
         # Actual production vector averaging/scaling/reorientation and four compositions.
         avg=out/'average_warp.nii.gz'; scaled=out/'negative_warp.nii.gz'; avgmat=out/'average.mat'
