@@ -60,6 +60,22 @@ def check_shear_jacobian(u, xyz, direction, spacing, interior, amplitude=.35, le
                 interior_derivative_bound=float(bound[interior].max()),boundary_derivative_bound=float(bound[~interior].max()))
 
 
+def check_syn_field_grid(field, fixed, filename):
+    """v2.6.5 Rigid/Affine/SyN -z 1: both stored fields use fixed virtual domain.
+    Storage grid does not specify mapping direction or resampled image reference.
+    Source: Examples/itkantsRegistrationHelper.hxx (v2.6.5), SyN virtualDomainImage.
+    """
+    import numpy as np
+    def geometry(image):
+        return dict(components=image.GetNumberOfComponentsPerPixel(), size=image.GetSize(),
+                    spacing=image.GetSpacing(), direction=image.GetDirection(), origin=image.GetOrigin())
+    actual=geometry(field); expected=geometry(fixed); expected['components']=3
+    ok=(actual['components']==3 and actual['size']==expected['size'] and
+        all(np.allclose(actual[k],expected[k]) for k in ('spacing','direction','origin')))
+    require(ok, 'SyN field reference domain mismatch: '+str(filename)+
+            '; actual='+json.dumps(actual)+'; expected fixed virtual domain='+json.dumps(expected))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ants-root', type=Path, required=True)
@@ -221,11 +237,11 @@ def main():
             [str(prefix)+'0GenericAffine.mat',str(prefix)+'1Warp.nii.gz',str(prefix)+'1InverseWarp.nii.gz'],timeout=600)
         forward=[str(prefix)+'1Warp.nii.gz',str(prefix)+'0GenericAffine.mat']
         backward=[f'[{prefix}0GenericAffine.mat,1]',str(prefix)+'1InverseWarp.nii.gz']
-        for filename,ref in ((forward[0],fixed),(backward[1],moving)):
-            field=read(filename); target=read(ref)
-            require(field.GetNumberOfComponentsPerPixel()==3 and field.GetSize()==target.GetSize() and
-                    np.allclose(field.GetOrigin(),target.GetOrigin()) and np.allclose(field.GetDirection(),target.GetDirection()) and
-                    np.allclose(field.GetSpacing(),target.GetSpacing()), 'SyN field reference domain mismatch')
+        # Both fields are stored on the fixed virtual grid for this registration.
+        # Inverse application below still writes onto moving, with the full inverse chain.
+        for filename in (forward[0],backward[1]):
+            field=read(filename)
+            check_syn_field_grid(field, read(fixed), filename)
             vector=sitk.GetArrayFromImage(field)
             derivative=np.stack([np.stack(np.gradient(vector[...,i],axis=(2,1,0)),axis=-1) for i in range(3)],axis=-2)
             basis=np.asarray(field.GetDirection()).reshape(3,3)@np.diag(field.GetSpacing())
